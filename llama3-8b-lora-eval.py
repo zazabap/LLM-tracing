@@ -31,8 +31,8 @@ print(tokenizer.batch_decode(outputs, skip_special_tokens=True)[0])
 # Layer-specific evaluation
 print("\n=== Layer-Specific Analysis ===")
 
-def analyze_specific_layers(model, tokenizer, input_text, target_layers=[0, 8, 16, 24, 31]):
-    """Analyze activation patterns in specific layers"""
+def analyze_specific_layers(model, tokenizer, input_text, target_layers=[0, 8, 16, 24, 31], generate_text=True):
+    """Analyze activation patterns in specific layers and optionally generate text"""
     layer_activations = {}
     
     def create_hook(layer_name):
@@ -68,25 +68,39 @@ def analyze_specific_layers(model, tokenizer, input_text, target_layers=[0, 8, 1
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
-    with torch.no_grad():
-        _ = model(**inputs)
+    # Generate text if requested
+    generated_text = None
+    if generate_text:
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    else:
+        with torch.no_grad():
+            _ = model(**inputs)
     
     # Remove hooks
     for hook in hooks:
         hook.remove()
     
-    return layer_activations
+    return layer_activations, generated_text
 
 def compare_layer_outputs(model, tokenizer, texts, target_layers=[0, 8, 16, 24, 31]):
     """Compare layer outputs across different inputs"""
     all_results = []
     
     for i, text in enumerate(texts):
-        print(f"\nAnalyzing text {i+1}: {text[:50]}...")
-        results = analyze_specific_layers(model, tokenizer, text, target_layers)
-        all_results.append(results)
+        print(f"\n{'='*60}")
+        print(f"Analyzing text {i+1}: {text}")
+        print('='*60)
         
-        print("Layer Statistics:")
+        results, generated_text = analyze_specific_layers(model, tokenizer, text, target_layers)
+        all_results.append((results, generated_text))
+        
+        print(f"\n📝 Generated Response:")
+        print(f"Input: {text}")
+        print(f"Output: {generated_text}")
+        
+        print(f"\n📊 Layer Statistics:")
         for layer_name, stats in results.items():
             print(f"  {layer_name}: Mean={stats['mean_activation']:.3f}, "
                   f"Std={stats['std_activation']:.3f}, "
@@ -95,17 +109,19 @@ def compare_layer_outputs(model, tokenizer, texts, target_layers=[0, 8, 16, 24, 
     return all_results
 
 def evaluate_layer_importance_by_masking(model, tokenizer, text, target_layers=[0, 8, 16, 24, 31]):
-    """Evaluate layer importance by masking each layer"""
+    """Evaluate layer importance by masking each layer and showing generation changes"""
     device = next(model.parameters()).device
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
     # Baseline generation
     with torch.no_grad():
-        baseline_outputs = model.generate(**inputs, max_new_tokens=50, do_sample=False)
+        baseline_outputs = model.generate(**inputs, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
     baseline_text = tokenizer.decode(baseline_outputs[0], skip_special_tokens=True)
     
-    print(f"Baseline output: {baseline_text}")
+    print(f"\n🔍 Layer Masking Analysis")
+    print(f"📝 Baseline output: {baseline_text}")
+    print(f"{'='*80}")
     
     layer_importance = {}
     
@@ -130,29 +146,39 @@ def evaluate_layer_importance_by_masking(model, tokenizer, text, target_layers=[
         
         try:
             with torch.no_grad():
-                masked_outputs = model.generate(**inputs, max_new_tokens=50, do_sample=False)
+                masked_outputs = model.generate(**inputs, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
             masked_text = tokenizer.decode(masked_outputs[0], skip_special_tokens=True)
             
-            # Calculate similarity (simple length and token overlap)
+            # Calculate similarity metrics
             baseline_tokens = set(baseline_text.split())
             masked_tokens = set(masked_text.split())
             
             jaccard_sim = len(baseline_tokens & masked_tokens) / len(baseline_tokens | masked_tokens) if baseline_tokens | masked_tokens else 0
             length_ratio = len(masked_text) / len(baseline_text) if baseline_text else 0
             
+            # Calculate token-level differences
+            baseline_words = baseline_text.split()
+            masked_words = masked_text.split()
+            
             layer_importance[f'layer_{layer_idx}'] = {
                 'jaccard_similarity': jaccard_sim,
                 'length_ratio': length_ratio,
-                'output_text': masked_text[:100] + "..." if len(masked_text) > 100 else masked_text
+                'output_text': masked_text,
+                'baseline_length': len(baseline_words),
+                'masked_length': len(masked_words)
             }
             
+            print(f"\n🎯 Layer {layer_idx} masked:")
+            print(f"   Similarity: {jaccard_sim:.3f} | Length ratio: {length_ratio:.3f}")
+            print(f"   Output: {masked_text}")
+            
         except Exception as e:
-            print(f"Error processing layer {layer_idx}: {e}")
+            print(f"❌ Error processing layer {layer_idx}: {e}")
             layer_importance[f'layer_{layer_idx}'] = {'error': str(e)}
         finally:
             hook.remove()
     
-    return layer_importance
+    return layer_importance, baseline_text
 
 # Run layer analysis
 test_texts = [
@@ -165,84 +191,76 @@ print("1. Comparing layer outputs across different inputs...")
 layer_comparison = compare_layer_outputs(model_with_adapter, tokenizer, test_texts)
 
 print("\n2. Evaluating layer importance by masking...")
-importance_results = evaluate_layer_importance_by_masking(
+importance_results, baseline = evaluate_layer_importance_by_masking(
     model_with_adapter, tokenizer, "How does a brokerage firm work?"
 )
 
-print("\nLayer Importance Analysis:")
+print(f"\n📊 Layer Importance Summary:")
+print(f"Baseline: {baseline}")
+print(f"{'='*80}")
 for layer_name, metrics in importance_results.items():
     if 'error' not in metrics:
         print(f"{layer_name}:")
-        print(f"  Jaccard Similarity: {metrics['jaccard_similarity']:.3f}")
-        print(f"  Length Ratio: {metrics['length_ratio']:.3f}")
-        print(f"  Sample Output: {metrics['output_text']}")
+        print(f"  📈 Similarity: {metrics['jaccard_similarity']:.3f}")
+        print(f"  📏 Length ratio: {metrics['length_ratio']:.3f}")
+        print(f"  📝 Output: {metrics['output_text'][:150]}...")
     else:
-        print(f"{layer_name}: {metrics['error']}")
+        print(f"{layer_name}: ❌ {metrics['error']}")
 
-# Analyze LoRA-specific layers (adapter layers)
-print("\n=== LoRA Adapter Analysis ===")
-def analyze_lora_adapters(model):
-    """Analyze the LoRA adapter parameters"""
-    adapter_info = {}
-    
-    for name, module in model.named_modules():
-        if hasattr(module, 'lora_A') or hasattr(module, 'lora_B'):
-            if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
-                lora_A = module.lora_A.default.weight.data
-                lora_B = module.lora_B.default.weight.data
-                
-                adapter_info[name] = {
-                    'lora_A_shape': lora_A.shape,
-                    'lora_B_shape': lora_B.shape,
-                    'lora_A_norm': lora_A.norm().item(),
-                    'lora_B_norm': lora_B.norm().item(),
-                    'rank': lora_A.shape[0]
-                }
-    
-    return adapter_info
-
-lora_analysis = analyze_lora_adapters(model_with_adapter)
-print("LoRA Adapter Statistics:")
-for adapter_name, stats in lora_analysis.items():
-    print(f"  {adapter_name}:")
-    print(f"    Rank: {stats['rank']}")
-    print(f"    LoRA A norm: {stats['lora_A_norm']:.3f}")
-    print(f"    LoRA B norm: {stats['lora_B_norm']:.3f}")
-
-# Debug: Print model structure to understand layer access
-def print_model_structure(model, max_depth=3):
-    """Print the model structure to understand how to access layers"""
-    def _print_structure(obj, name="", depth=0, max_depth=3):
-        if depth > max_depth:
-            return
+print("\n3. Analyzing generation quality across layers...")
+# Test how different layers affect generation quality
+def test_generation_quality(model, tokenizer, prompts, target_layers=[0, 8, 16, 24, 31]):
+    """Test generation quality for different prompts"""
+    for prompt in prompts:
+        print(f"\n🎯 Testing prompt: '{prompt}'")
+        print("-" * 60)
         
-        indent = "  " * depth
-        if hasattr(obj, '__class__'):
-            class_name = obj.__class__.__name__
-            print(f"{indent}{name}: {class_name}")
-            
-            # For modules, print their named children
-            if hasattr(obj, 'named_children'):
-                for child_name, child in obj.named_children():
-                    if child_name in ['layers', 'model', 'base_model'] or 'layer' in child_name.lower():
-                        _print_structure(child, child_name, depth + 1, max_depth)
-                    elif depth < 2:  # Only show top-level for first 2 depths
-                        _print_structure(child, child_name, depth + 1, max_depth)
-    
-    print("=== Model Structure ===")
-    _print_structure(model, "model", 0, max_depth)
-    
-    # Try to access layers and print count
-    try:
-        if hasattr(model, 'base_model'):
-            layers = model.base_model.model.model.layers
-            print(f"\nFound {len(layers)} layers via: model.base_model.model.model.layers")
-        elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
-            layers = model.model.layers  
-            print(f"\nFound {len(layers)} layers via: model.model.layers")
-        else:
-            print("\nCould not find layers!")
-    except Exception as e:
-        print(f"\nError accessing layers: {e}")
+        _, generated = analyze_specific_layers(model, tokenizer, prompt, target_layers, generate_text=True)
+        print(f"🤖 Generated: {generated}")
 
-print_model_structure(model_with_adapter)
+quality_test_prompts = [
+    "What is the difference between stocks and bonds?",
+    "Explain risk management in finance.",
+    "How do interest rates affect the economy?"
+]
+
+test_generation_quality(model_with_adapter, tokenizer, quality_test_prompts)
+
+print("\n4. Comparing Base Model vs Fine-tuned Model...")
+def compare_base_vs_finetuned(base_model, finetuned_model, tokenizer, prompts):
+    """Compare generations between base model and fine-tuned model"""
+    for prompt in prompts:
+        print(f"\n🔄 Comparing models for: '{prompt}'")
+        print("=" * 70)
+        
+        # Base model generation
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+        device = next(base_model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            base_outputs = base_model.generate(**inputs, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+        base_text = tokenizer.decode(base_outputs[0], skip_special_tokens=True)
+        
+        # Fine-tuned model generation
+        with torch.no_grad():
+            ft_outputs = finetuned_model.generate(**inputs, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+        ft_text = tokenizer.decode(ft_outputs[0], skip_special_tokens=True)
+        
+        print(f"🏗️  Base Model: {base_text}")
+        print(f"🎯 Fine-tuned: {ft_text}")
+        
+        # Calculate differences
+        base_tokens = set(base_text.split())
+        ft_tokens = set(ft_text.split())
+        similarity = len(base_tokens & ft_tokens) / len(base_tokens | ft_tokens) if base_tokens | ft_tokens else 0
+        
+        print(f"📊 Similarity: {similarity:.3f}")
+
+comparison_prompts = [
+    "How does a brokerage firm work?",
+    "What are the benefits of diversification?",
+    "Explain compound interest."
+]
+
+compare_base_vs_finetuned(model, model_with_adapter, tokenizer, comparison_prompts)
