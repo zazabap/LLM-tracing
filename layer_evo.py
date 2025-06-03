@@ -286,8 +286,8 @@ def main():
     print("🔍 Analyzing layer evolution across training checkpoints...")
     analyzer.analyze_checkpoint_evolution(
         checkpoint_dir="Meta-Llama-3.1-8B-Instruct-finetuned",
-        checkpoint_range=(10, 80, 10),  # start, end, step
-        num_samples=30  # Use 30 test samples for analysis
+        checkpoint_range=(50, 800, 50),  # start, end, step
+        num_samples=50  # Use 50 test samples for analysis
     )
     
     # Create visualizations

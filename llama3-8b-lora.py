@@ -7,6 +7,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from peft import prepare_model_for_kbit_training
 import numpy as np
 from transformers import DataCollatorWithPadding,DataCollatorForLanguageModeling, Trainer, TrainingArguments
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -74,11 +75,13 @@ trainer = Trainer(
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         eval_strategy="no",  # Disable evaluation during training to avoid NCCL issues
-        save_strategy="epoch",
-        num_train_epochs=1,
+        save_strategy="steps",  # Save based on training steps instead of epochs
+        save_steps=50,  # Save every 50 steps (adjust based on your needs)
+        save_total_limit=10,  # Keep only the last 5 checkpoints to save disk space
+        num_train_epochs=10,  # Number of epochs to train
         weight_decay=0.01,
         load_best_model_at_end=False,  # Set to False since we disabled eval_strategy
-        logging_steps=1,
+        logging_steps=10,  # Log every 10 steps
         report_to="none",
         dataloader_pin_memory=False,
         remove_unused_columns=False,
@@ -91,4 +94,39 @@ trainer = Trainer(
 )
 
 trainer.train()
+
+# After training, you can load from specific checkpoints:
+
+# # Load from step 100
+# model_step_100 = PeftModel.from_pretrained(model, "Meta-Llama-3.1-8B-Instruct-finetuned/checkpoint-100")
+
+# # Load from step 200
+# model_step_200 = PeftModel.from_pretrained(model, "Meta-Llama-3.1-8B-Instruct-finetuned/checkpoint-200")
+
+# # Compare performance at different steps
+# def test_checkpoint_performance(base_model, checkpoint_path, tokenizer, test_prompt):
+#     """Test model performance at a specific checkpoint"""
+#     model_checkpoint = PeftModel.from_pretrained(base_model, checkpoint_path)
+#     model_checkpoint.eval()
+    
+#     inputs = tokenizer(test_prompt, return_tensors="pt")
+#     device = next(model_checkpoint.parameters()).device
+#     inputs = {k: v.to(device) for k, v in inputs.items()}
+    
+#     with torch.no_grad():
+#         outputs = model_checkpoint.generate(**inputs, max_new_tokens=100, temperature=0.7)
+    
+#     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+#     print(f"Checkpoint {checkpoint_path}:")
+#     print(f"Response: {response}\n")
+    
+#     return response
+
+# # Test different checkpoints
+# test_prompt = "How does a brokerage firm work?"
+# checkpoints = ["checkpoint-50", "checkpoint-100", "checkpoint-150"]
+
+# for checkpoint in checkpoints:
+#     if os.path.exists(f"Meta-Llama-3.1-8B-Instruct-finetuned/{checkpoint}"):
+#         test_checkpoint_performance(model, f"Meta-Llama-3.1-8B-Instruct-finetuned/{checkpoint}", tokenizer, test_prompt)
 
